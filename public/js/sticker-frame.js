@@ -372,6 +372,245 @@
         return lines;
     }
 
+    const BUBBLE_FONT = '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+
+    const BUBBLE_DEFAULTS = {
+        text: '在这里输入台词',
+        fontSize: 18,
+        maxWidthRatio: 0.42,
+        shape: 'ellipse',
+        tail: 'bottom',
+        textColor: '#1f1b16',
+        fillColor: '#ffffff',
+        strokeColor: '#26221c'
+    };
+
+    /** 中英混排分词：连续 ASCII 单词不拆开，中文逐字；\n 强制换行 */
+    function tokenizeForWrap(text) {
+        const tokens = [];
+        let buf = '';
+        for (const ch of String(text || '')) {
+            if (/[A-Za-z0-9'’\-]/.test(ch)) {
+                buf += ch;
+                continue;
+            }
+            if (buf) {
+                tokens.push(buf);
+                buf = '';
+            }
+            tokens.push(ch);
+        }
+        if (buf) tokens.push(buf);
+        return tokens;
+    }
+
+    function wrapTokens(ctx, tokens, maxWidth) {
+        const lines = [];
+        let line = '';
+        for (const tk of tokens) {
+            if (tk === '\n') {
+                lines.push(line);
+                line = '';
+                continue;
+            }
+            const test = line + tk;
+            if (ctx.measureText(test).width > maxWidth && line) {
+                lines.push(line);
+                line = tk === ' ' ? '' : tk;
+            } else {
+                line = test;
+            }
+        }
+        lines.push(line);
+        return lines.map((l) => l.replace(/\s+$/, ''));
+    }
+
+    // 椭圆半轴系数：水平 1.274 / 垂直 1.61，保证最长那行文字也不会被椭圆切掉
+    const ELLIPSE_KX = 1.274;
+    const ELLIPSE_KY = 1.61;
+
+    function measureBubble(ctx, bubble, drawW, uiScale) {
+        const fontSize = scaledUi(Number(bubble.fontSize) || BUBBLE_DEFAULTS.fontSize, uiScale, 10);
+        const shape = bubble.shape === 'rect' ? 'rect' : 'ellipse';
+        ctx.font = `600 ${fontSize}px ${BUBBLE_FONT}`;
+        const ratio = Number(bubble.maxWidthRatio) || BUBBLE_DEFAULTS.maxWidthRatio;
+        const targetW = Math.max(60, drawW * ratio);
+        const padX = fontSize * 0.62;
+        const padY = fontSize * 0.5;
+        const margin = fontSize * 0.35;
+        // 反推文字可用宽度，使气泡整体宽度不超过 targetW
+        const maxTextW = shape === 'ellipse'
+            ? Math.max(fontSize * 1.6, targetW / ELLIPSE_KX - margin * 2)
+            : Math.max(fontSize * 1.6, targetW - padX * 2);
+        const lines = wrapTokens(ctx, tokenizeForWrap(bubble.text), maxTextW);
+        const visible = lines.filter((l) => l.length);
+        const lineH = fontSize * 1.38;
+        let textW = 0;
+        for (const line of visible) textW = Math.max(textW, ctx.measureText(line).width);
+        return { fontSize, lines, visible, lineH, textW, padX, padY, margin, shape };
+    }
+
+    function bubbleShapeMetrics(m) {
+        if (m.shape === 'rect') {
+            const w = Math.max(m.fontSize * 2.4, m.textW + m.padX * 2);
+            const h = Math.max(m.fontSize * 1.9, m.visible.length * m.lineH + m.padY * 2);
+            return {
+                shape: 'rect',
+                w,
+                h,
+                halfW: w / 2,
+                halfH: h / 2,
+                radius: Math.min(w, h) * 0.32
+            };
+        }
+        const rx = Math.max(m.fontSize * 1.2, ELLIPSE_KX * (m.textW / 2 + m.margin));
+        const ry = Math.max(m.fontSize * 0.95, ELLIPSE_KY * ((m.visible.length * m.lineH) / 2 + m.margin));
+        return { shape: 'ellipse', w: rx * 2, h: ry * 2, halfW: rx, halfH: ry, radius: 0 };
+    }
+
+    function tailTriangle(cx, cy, halfW, halfH, dir, tailLen, tailHalf) {
+        const ol = Math.min(halfW, halfH) * 0.2;
+        const skew = halfW * 0.12;
+        if (dir === 'top') {
+            return [[cx - tailHalf, cy - halfH + ol], [cx + tailHalf, cy - halfH + ol], [cx + skew, cy - halfH - tailLen]];
+        }
+        if (dir === 'left') {
+            return [[cx - halfW + ol, cy - tailHalf], [cx - halfW + ol, cy + tailHalf], [cx - halfW - tailLen, cy + skew]];
+        }
+        if (dir === 'right') {
+            return [[cx + halfW - ol, cy - tailHalf], [cx + halfW - ol, cy + tailHalf], [cx + halfW + tailLen, cy + skew]];
+        }
+        return [[cx - tailHalf, cy + halfH - ol], [cx + tailHalf, cy + halfH - ol], [cx + skew, cy + halfH + tailLen]];
+    }
+
+    function drawBubble(ctx, bubble, cx, cy, drawW, uiScale) {
+        const m = measureBubble(ctx, bubble, drawW, uiScale);
+        if (!m.visible.length) return null;
+        const g = bubbleShapeMetrics(m);
+        const shape = g.shape;
+        const strokeW = Math.max(1.5, m.fontSize * 0.13);
+        const tailDir = bubble.tail && bubble.tail !== 'none' ? bubble.tail : null;
+        const tailLen = Math.min(g.halfW, g.halfH) * 0.62;
+        const tailHalf = Math.min(g.halfW, g.halfH) * 0.3;
+        const fill = bubble.fillColor || BUBBLE_DEFAULTS.fillColor;
+        const stroke = bubble.strokeColor || BUBBLE_DEFAULTS.strokeColor;
+
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        if (tailDir) {
+            const tri = tailTriangle(cx, cy, g.halfW, g.halfH, tailDir, tailLen, tailHalf);
+            ctx.beginPath();
+            ctx.moveTo(tri[0][0], tri[0][1]);
+            ctx.lineTo(tri[1][0], tri[1][1]);
+            ctx.lineTo(tri[2][0], tri[2][1]);
+            ctx.closePath();
+            ctx.fillStyle = fill;
+            ctx.fill();
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = strokeW;
+            ctx.stroke();
+        }
+
+        // 主体带阴影，压在尾巴根部之上，接缝自然
+        ctx.save();
+        ctx.shadowColor = 'rgba(20, 16, 10, 0.28)';
+        ctx.shadowBlur = Math.max(4, m.fontSize * 0.7);
+        ctx.shadowOffsetY = Math.max(2, m.fontSize * 0.18);
+        ctx.fillStyle = fill;
+        if (shape === 'ellipse') {
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, g.halfW, g.halfH, 0, 0, Math.PI * 2);
+            ctx.fill();
+        } else {
+            roundRect(ctx, cx - g.halfW, cy - g.halfH, g.w, g.h, g.radius);
+            ctx.fill();
+        }
+        ctx.restore();
+
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = strokeW;
+        if (shape === 'ellipse') {
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, g.halfW, g.halfH, 0, 0, Math.PI * 2);
+            ctx.stroke();
+        } else {
+            roundRect(ctx, cx - g.halfW, cy - g.halfH, g.w, g.h, g.radius);
+            ctx.stroke();
+        }
+
+        ctx.fillStyle = bubble.textColor || BUBBLE_DEFAULTS.textColor;
+        ctx.font = `600 ${m.fontSize}px ${BUBBLE_FONT}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        let y = cy - (m.visible.length * m.lineH) / 2 + m.lineH / 2;
+        for (const line of m.visible) {
+            ctx.fillText(line, cx, y);
+            y += m.lineH;
+        }
+        ctx.restore();
+
+        return { cx, cy, w: g.w, h: g.h };
+    }
+
+    /**
+     * 气泡坐标用「相对图片内容区」的归一化值（x/y ∈ [0,1]）存储，
+     * 因此预览（缩放过）和导出（原分辨率）落点完全一致。
+     */
+    function drawBubbles(ctx, bubbles, imgX, imgY, drawW, drawH, uiScale) {
+        if (!Array.isArray(bubbles) || !bubbles.length || !drawW || !drawH) return;
+        for (const bubble of bubbles) {
+            const nx = Math.min(0.98, Math.max(0.02, Number(bubble.x) || 0));
+            const ny = Math.min(0.98, Math.max(0.02, Number(bubble.y) || 0));
+            drawBubble(ctx, bubble, imgX + nx * drawW, imgY + ny * drawH, drawW, uiScale);
+        }
+    }
+
+    function resolveImageRect(image, options) {
+        const measured = measureFrame(image, options);
+        const opts = measured.opts || {};
+        if (opts.plain || opts.preset === 'none') {
+            return {
+                imgX: 0,
+                imgY: 0,
+                drawW: measured.drawW,
+                drawH: measured.drawH,
+                uiScale: measured.uiScale || 1
+            };
+        }
+        return {
+            imgX: (measured.padding || 0) + (measured.popPadSides || 0),
+            imgY: (measured.padding || 0) + (measured.popPadTop || 0),
+            drawW: measured.drawW,
+            drawH: measured.drawH,
+            uiScale: measured.uiScale || 1
+        };
+    }
+
+    function bubbleBoxAt(ctx, bubble, layout) {
+        const m = measureBubble(ctx, bubble, layout.drawW, layout.uiScale);
+        if (!m.visible.length) return null;
+        const g = bubbleShapeMetrics(m);
+        return {
+            cx: layout.imgX + (Number(bubble.x) || 0) * layout.drawW,
+            cy: layout.imgY + (Number(bubble.y) || 0) * layout.drawH,
+            w: g.w,
+            h: g.h
+        };
+    }
+
+    /** 从上层往下命中，返回气泡下标，未命中返回 -1 */
+    function hitTestBubble(ctx, bubbles, px, py, layout) {
+        if (!Array.isArray(bubbles)) return -1;
+        for (let i = bubbles.length - 1; i >= 0; i -= 1) {
+            const box = bubbleBoxAt(ctx, bubbles[i], layout);
+            if (!box) continue;
+            if (Math.abs(px - box.cx) <= box.w / 2 && Math.abs(py - box.cy) <= box.h / 2) return i;
+        }
+        return -1;
+    }
+
     function resolveDrawSize(image, opts) {
         const imgW = image.naturalWidth || image.width;
         const imgH = image.naturalHeight || image.height;
@@ -762,6 +1001,7 @@
         const imgW = image.naturalWidth || image.width || measured.drawW;
         const imgH = image.naturalHeight || image.height || measured.drawH;
         ctx.drawImage(image, 0, 0, imgW, imgH, 0, 0, measured.drawW, measured.drawH);
+        drawBubbles(ctx, mergeOptions(options || {}).bubbles, 0, 0, measured.drawW, measured.drawH, measured.uiScale || 1);
         return canvas;
     }
 
@@ -873,6 +1113,8 @@
                 strokeFramePath(ctx, imgX, imgY, drawW, drawH, borderRadius, borderStyle);
             }
         }
+
+        drawBubbles(ctx, opts.bubbles, imgX, imgY, drawW, drawH, uiScale);
 
         if (measured.captionLines.length) {
             ctx.font = `${measured.captionFontSize}px "Noto Sans SC", sans-serif`;
@@ -1004,6 +1246,7 @@
 
     global.StickerFrame = {
         PRESETS,
+        BUBBLE_DEFAULTS,
         mergeOptions,
         measureFrame,
         renderStickerFrame,
@@ -1011,6 +1254,9 @@
         isCanvasCorrupt,
         downscaleImage,
         canvasToBlob,
-        blobToBase64
+        blobToBase64,
+        resolveImageRect,
+        bubbleBoxAt,
+        hitTestBubble
     };
 })(typeof window !== 'undefined' ? window : globalThis);

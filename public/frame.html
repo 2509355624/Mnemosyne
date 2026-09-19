@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>图片边框 - 批量贴纸框</title>
-    <link rel="stylesheet" href="styles/frame-paper.css?v=4">
+    <link rel="stylesheet" href="styles/frame-paper.css?v=5">
 </head>
 <body>
     <a href="index.html" class="back-home">
@@ -172,6 +172,70 @@
                                 <img id="matteThumbImg" alt="抠图">
                             </div>
                         </div>
+
+                        <div class="dof-section">
+                            <div class="dof-section-title">对话气泡</div>
+                            <p class="dof-hint">在预览图上<b>点一下空白处</b>加一个气泡，按住拖动可移动。位置按图片比例保存，导出时自动对齐。</p>
+                            <div class="bubble-list" id="bubbleList"></div>
+                            <div id="bubbleEditor" hidden>
+                                <div class="style-row">
+                                    <div class="style-field full">
+                                        <label for="bubbleText">气泡文字（可回车换行）</label>
+                                        <textarea id="bubbleText" rows="2" placeholder="输入台词"></textarea>
+                                    </div>
+                                </div>
+                                <div class="style-row">
+                                    <div class="style-field">
+                                        <label for="bubbleShape">形状</label>
+                                        <select id="bubbleShape">
+                                            <option value="ellipse">椭圆对话泡</option>
+                                            <option value="rect">圆角方框</option>
+                                        </select>
+                                    </div>
+                                    <div class="style-field">
+                                        <label for="bubbleTail">尾巴</label>
+                                        <select id="bubbleTail">
+                                            <option value="bottom">朝下</option>
+                                            <option value="top">朝上</option>
+                                            <option value="left">朝左</option>
+                                            <option value="right">朝右</option>
+                                            <option value="none">不要尾巴</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="style-row">
+                                    <div class="style-field">
+                                        <label for="bubbleFontSize">字号 <span id="bubbleFontSizeVal">18</span></label>
+                                        <input type="range" id="bubbleFontSize" min="10" max="48" step="1" value="18">
+                                    </div>
+                                    <div class="style-field">
+                                        <label for="bubbleWidth">最大宽度 <span id="bubbleWidthVal">42</span>%</label>
+                                        <input type="range" id="bubbleWidth" min="20" max="80" step="1" value="42">
+                                    </div>
+                                </div>
+                                <div class="style-row">
+                                    <div class="style-field">
+                                        <label for="bubbleFill">气泡底色</label>
+                                        <input type="color" id="bubbleFill" value="#ffffff">
+                                    </div>
+                                    <div class="style-field">
+                                        <label for="bubbleStroke">描边色</label>
+                                        <input type="color" id="bubbleStroke" value="#26221c">
+                                    </div>
+                                </div>
+                                <div class="style-row">
+                                    <div class="style-field">
+                                        <label for="bubbleTextColor">文字色</label>
+                                        <input type="color" id="bubbleTextColor" value="#1f1b16">
+                                    </div>
+                                    <div class="style-field"></div>
+                                </div>
+                                <div class="bubble-actions">
+                                    <button type="button" class="btn-secondary" id="bubbleDeleteBtn">删除这个</button>
+                                    <button type="button" class="link-btn" id="bubbleClearBtn">清空本图气泡</button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="export-section">
@@ -189,7 +253,7 @@
         </div>
     </div>
 
-    <script src="js/sticker-frame.js?v=13"></script>
+    <script src="js/sticker-frame.js?v=14"></script>
     <script>
         const EXPORT_FOLDER_KEY = 'frameExportFolderPath';
         let files = [];
@@ -197,6 +261,10 @@
         let exportDirHandle = null;
         let previewTimer = null;
         let previewObjectUrl = null;
+        let selectedBubbleIndex = -1;
+        let currentLayout = null;
+        let bubbleDrag = null;
+        const measureCtx = document.createElement('canvas').getContext('2d');
 
         const els = {
             uploadDrop: document.getElementById('uploadDrop'),
@@ -245,7 +313,21 @@
             exportFolderPath: document.getElementById('exportFolderPath'),
             pickFolderBtn: document.getElementById('pickFolderBtn'),
             exportBtn: document.getElementById('exportBtn'),
-            exportProgress: document.getElementById('exportProgress')
+            exportProgress: document.getElementById('exportProgress'),
+            bubbleList: document.getElementById('bubbleList'),
+            bubbleEditor: document.getElementById('bubbleEditor'),
+            bubbleText: document.getElementById('bubbleText'),
+            bubbleShape: document.getElementById('bubbleShape'),
+            bubbleTail: document.getElementById('bubbleTail'),
+            bubbleFontSize: document.getElementById('bubbleFontSize'),
+            bubbleFontSizeVal: document.getElementById('bubbleFontSizeVal'),
+            bubbleWidth: document.getElementById('bubbleWidth'),
+            bubbleWidthVal: document.getElementById('bubbleWidthVal'),
+            bubbleFill: document.getElementById('bubbleFill'),
+            bubbleStroke: document.getElementById('bubbleStroke'),
+            bubbleTextColor: document.getElementById('bubbleTextColor'),
+            bubbleDeleteBtn: document.getElementById('bubbleDeleteBtn'),
+            bubbleClearBtn: document.getElementById('bubbleClearBtn')
         };
 
         const matteCache = new Map();
@@ -257,6 +339,183 @@
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
+        }
+
+        function currentItem() {
+            return files[previewIndex] || null;
+        }
+
+        function ensureBubbles(item) {
+            if (!item) return [];
+            if (!Array.isArray(item.bubbles)) item.bubbles = [];
+            return item.bubbles;
+        }
+
+        function syncBubbleEditor() {
+            const list = ensureBubbles(currentItem());
+            const bubble = list[selectedBubbleIndex];
+            if (!bubble) {
+                els.bubbleEditor.hidden = true;
+                return;
+            }
+            els.bubbleText.value = bubble.text || '';
+            els.bubbleShape.value = bubble.shape || 'ellipse';
+            els.bubbleTail.value = bubble.tail || 'bottom';
+            els.bubbleFontSize.value = bubble.fontSize ?? StickerFrame.BUBBLE_DEFAULTS.fontSize;
+            els.bubbleFontSizeVal.textContent = els.bubbleFontSize.value;
+            els.bubbleWidth.value = Math.round((bubble.maxWidthRatio ?? StickerFrame.BUBBLE_DEFAULTS.maxWidthRatio) * 100);
+            els.bubbleWidthVal.textContent = els.bubbleWidth.value;
+            els.bubbleFill.value = bubble.fillColor || '#ffffff';
+            els.bubbleStroke.value = bubble.strokeColor || '#26221c';
+            els.bubbleTextColor.value = bubble.textColor || '#1f1b16';
+            els.bubbleEditor.hidden = false;
+        }
+
+        function renderBubblePanel() {
+            const item = currentItem();
+            if (!item) {
+                els.bubbleList.innerHTML = '';
+                els.bubbleEditor.hidden = true;
+                return;
+            }
+            const list = ensureBubbles(item);
+            if (!list.length) {
+                els.bubbleList.innerHTML = '<p class="bubble-empty">还没有气泡。在左边的预览图上点一下就加一个。</p>';
+                els.bubbleEditor.hidden = true;
+                return;
+            }
+            els.bubbleList.innerHTML = list.map((bubble, i) => `
+                <div class="bubble-row${i === selectedBubbleIndex ? ' active' : ''}" data-index="${i}">
+                    <span class="bubble-index">${i + 1}</span>
+                    <span class="bubble-row-text">${escapeHtml(String(bubble.text || '').replace(/\n/g, ' ')) || '（空）'}</span>
+                    <button type="button" class="link-btn bubble-row-del" data-index="${i}">删除</button>
+                </div>
+            `).join('');
+
+            els.bubbleList.querySelectorAll('.bubble-row').forEach((row) => {
+                row.addEventListener('click', (e) => {
+                    if (e.target.classList.contains('bubble-row-del')) return;
+                    selectedBubbleIndex = Number(row.dataset.index);
+                    renderBubblePanel();
+                    syncBubbleEditor();
+                });
+            });
+            els.bubbleList.querySelectorAll('.bubble-row-del').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteBubble(Number(btn.dataset.index));
+                });
+            });
+
+            if (selectedBubbleIndex >= 0 && selectedBubbleIndex < list.length) {
+                els.bubbleEditor.hidden = false;
+            } else {
+                els.bubbleEditor.hidden = true;
+            }
+        }
+
+        function syncBubbleRowLabel() {
+            const row = els.bubbleList.querySelectorAll('.bubble-row')[selectedBubbleIndex];
+            const bubble = ensureBubbles(currentItem())[selectedBubbleIndex];
+            if (!row || !bubble) return;
+            const span = row.querySelector('.bubble-row-text');
+            if (span) span.textContent = String(bubble.text || '').replace(/\n/g, ' ') || '（空）';
+        }
+
+        function updateSelectedBubble(patch) {
+            const list = ensureBubbles(currentItem());
+            const bubble = list[selectedBubbleIndex];
+            if (!bubble) return;
+            Object.assign(bubble, patch);
+            if ('text' in patch) syncBubbleRowLabel();
+            schedulePreview();
+        }
+
+        function deleteBubble(index) {
+            const list = ensureBubbles(currentItem());
+            if (index < 0 || index >= list.length) return;
+            list.splice(index, 1);
+            if (selectedBubbleIndex >= list.length) selectedBubbleIndex = list.length - 1;
+            renderBubblePanel();
+            syncBubbleEditor();
+            schedulePreview();
+        }
+
+        /** 按气泡自身尺寸夹住中心点，避免整体越出图片内容区 */
+        function clampBubbleToImage(bubble, nx, ny) {
+            const layout = currentLayout;
+            if (!layout || !layout.drawW || !layout.drawH) {
+                return { x: Math.min(0.98, Math.max(0.02, nx)), y: Math.min(0.98, Math.max(0.02, ny)) };
+            }
+            const box = StickerFrame.bubbleBoxAt(measureCtx, bubble, layout);
+            const hx = box ? Math.min(0.5, box.w / 2 / layout.drawW) : 0.02;
+            const hy = box ? Math.min(0.5, box.h / 2 / layout.drawH) : 0.02;
+            return {
+                x: Math.min(1 - hx, Math.max(hx, nx)),
+                y: Math.min(1 - hy, Math.max(hy, ny))
+            };
+        }
+
+        function addBubbleAt(nx, ny) {
+            const list = ensureBubbles(currentItem());
+            const draft = { ...StickerFrame.BUBBLE_DEFAULTS };
+            const pos = clampBubbleToImage(draft, nx, ny);
+            list.push({
+                ...draft,
+                x: pos.x,
+                y: pos.y
+            });
+            selectedBubbleIndex = list.length - 1;
+            renderBubblePanel();
+            syncBubbleEditor();
+            schedulePreview();
+            if (els.bubbleText) {
+                els.bubbleText.focus();
+                els.bubbleText.select();
+            }
+        }
+
+        /** 鼠标事件 → 画布逻辑坐标 → 抵消微旋转 → 相对图片内容区的归一化坐标 */
+        function canvasPointToNorm(evt, canvas) {
+            const rect = canvas.getBoundingClientRect();
+            if (!rect.width || !rect.height || !currentLayout) return null;
+            if (!currentLayout.drawW || !currentLayout.drawH) return null;
+            const px = ((evt.clientX - rect.left) / rect.width) * canvas.width;
+            const py = ((evt.clientY - rect.top) / rect.height) * canvas.height;
+            const tilt = Number(els.tiltRange.value) || 0;
+            let ux = px;
+            let uy = py;
+            if (tilt) {
+                const rad = (tilt * Math.PI) / 180;
+                const dx = px - canvas.width / 2;
+                const dy = py - canvas.height / 2;
+                ux = dx * Math.cos(rad) + dy * Math.sin(rad) + canvas.width / 2;
+                uy = -dx * Math.sin(rad) + dy * Math.cos(rad) + canvas.height / 2;
+            }
+            return {
+                x: (ux - currentLayout.imgX) / currentLayout.drawW,
+                y: (uy - currentLayout.imgY) / currentLayout.drawH,
+                px: ux,
+                py: uy
+            };
+        }
+
+        function attachBubbleInteraction(canvas) {
+            canvas.style.cursor = 'crosshair';
+            canvas.addEventListener('mousedown', (e) => {
+                const item = currentItem();
+                if (!item) return;
+                const p = canvasPointToNorm(e, canvas);
+                if (!p) return;
+                const hit = StickerFrame.hitTestBubble(measureCtx, ensureBubbles(item), p.px, p.py, currentLayout);
+                bubbleDrag = { index: hit, moved: false, startX: e.clientX, startY: e.clientY };
+                if (hit >= 0) {
+                    selectedBubbleIndex = hit;
+                    renderBubblePanel();
+                    syncBubbleEditor();
+                }
+                e.preventDefault();
+            });
         }
 
         function syncSolidBgRowVisibility() {
@@ -326,7 +585,7 @@
             return task;
         }
 
-        function readStyleOptions(caption = '', { forPreview = false, matteFg = null } = {}) {
+        function readStyleOptions(caption = '', { forPreview = false, matteFg = null, bubbles = [] } = {}) {
             const opts = {
                 preset: els.presetSelect.value,
                 padding: Number(els.paddingRange.value),
@@ -337,7 +596,8 @@
                 tiltDeg: Number(els.tiltRange.value),
                 tape: els.tapeCheck.checked,
                 outputWidth: Number(els.outputWidth.value),
-                caption
+                caption,
+                bubbles
             };
             if (forPreview) {
                 opts.previewMaxWidth = 960;
@@ -409,6 +669,8 @@
             if (!files.length) {
                 els.fileList.innerHTML = '<div class="preview-empty">还没有图片，从文件夹选中后拖进来吧</div>';
                 els.fileCountLabel.textContent = '0 张';
+                selectedBubbleIndex = -1;
+                renderBubblePanel();
                 updateExportButtonState();
                 return;
             }
@@ -428,7 +690,9 @@
             els.fileList.querySelectorAll('.file-item').forEach((row) => {
                 row.addEventListener('click', () => {
                     previewIndex = Number(row.dataset.index);
+                    selectedBubbleIndex = -1;
                     renderFileList();
+                    renderBubblePanel();
                     schedulePreview();
                 });
             });
@@ -482,12 +746,14 @@
                     name: file.name,
                     thumbUrl,
                     caption: '',
+                    bubbles: [],
                     selected: true
                 });
             }
 
             if (files.length === incoming.length) previewIndex = 0;
             renderFileList();
+            renderBubblePanel();
             schedulePreview();
         }
 
@@ -496,6 +762,7 @@
             files.forEach((f) => URL.revokeObjectURL(f.thumbUrl));
             files = [];
             previewIndex = 0;
+            selectedBubbleIndex = -1;
             revokePreviewUrl();
             const oldCanvas = document.getElementById('previewCanvas');
             if (oldCanvas) oldCanvas.remove();
@@ -504,6 +771,7 @@
             els.previewNav.hidden = true;
             els.previewFileName.textContent = '—';
             renderFileList();
+            renderBubblePanel();
         }
 
         function revokePreviewUrl() {
@@ -563,6 +831,8 @@
                 els.previewImage.hidden = true;
                 els.previewNav.hidden = true;
                 els.previewFileName.textContent = '—';
+                currentLayout = null;
+                renderBubblePanel();
                 return;
             }
 
@@ -613,16 +883,17 @@
 
                 const styleOpts = readStyleOptions(item.caption, {
                     forPreview: true,
-                    matteFg
+                    matteFg,
+                    bubbles: ensureBubbles(item)
                 });
+                currentLayout = StickerFrame.resolveImageRect(source, styleOpts);
                 let canvas = StickerFrame.renderStickerFrame(source, styleOpts);
                 if (isPreviewCanvasCorrupt(canvas)) {
                     await new Promise((r) => setTimeout(r, 40));
                     const smaller = downscaleImageForPreview(img, 720);
-                    canvas = StickerFrame.renderStickerFrame(
-                        smaller,
-                        { ...styleOpts, previewMaxWidth: 720 }
-                    );
+                    const smallerOpts = { ...styleOpts, previewMaxWidth: 720 };
+                    canvas = StickerFrame.renderStickerFrame(smaller, smallerOpts);
+                    currentLayout = StickerFrame.resolveImageRect(smaller, smallerOpts);
                 }
                 revokePreviewUrl();
 
@@ -641,6 +912,7 @@
                 previewCanvas.style.height = `${logicalH * scale}px`;
                 previewCanvas.getContext('2d').drawImage(canvas, 0, 0);
                 els.previewWrap.appendChild(previewCanvas);
+                attachBubbleInteraction(previewCanvas);
 
                 if (isPreviewCanvasCorrupt(previewCanvas)) {
                     els.previewEmpty.hidden = false;
@@ -751,7 +1023,8 @@
                     }
                     return readStyleOptions(item.caption, {
                         forPreview: false,
-                        matteFg
+                        matteFg,
+                        bubbles: ensureBubbles(item)
                     });
                 }
 
@@ -854,6 +1127,49 @@
                     rerender();
                 });
             }
+
+            if (els.bubbleText) {
+                els.bubbleText.addEventListener('input', () => {
+                    updateSelectedBubble({ text: els.bubbleText.value });
+                });
+            }
+            [['bubbleShape', 'shape'], ['bubbleTail', 'tail']].forEach(([id, key]) => {
+                if (!els[id]) return;
+                els[id].addEventListener('change', () => updateSelectedBubble({ [key]: els[id].value }));
+            });
+            [
+                ['bubbleFontSize', 'bubbleFontSizeVal', 'fontSize', (v) => Number(v)],
+                ['bubbleWidth', 'bubbleWidthVal', 'maxWidthRatio', (v) => Number(v) / 100]
+            ].forEach(([id, labelId, key, fmt]) => {
+                if (!els[id]) return;
+                els[id].addEventListener('input', () => {
+                    if (els[labelId]) els[labelId].textContent = els[id].value;
+                    updateSelectedBubble({ [key]: fmt(els[id].value) });
+                });
+            });
+            [
+                ['bubbleFill', 'fillColor'],
+                ['bubbleStroke', 'strokeColor'],
+                ['bubbleTextColor', 'textColor']
+            ].forEach(([id, key]) => {
+                if (!els[id]) return;
+                els[id].addEventListener('input', () => updateSelectedBubble({ [key]: els[id].value }));
+            });
+            if (els.bubbleDeleteBtn) {
+                els.bubbleDeleteBtn.addEventListener('click', () => deleteBubble(selectedBubbleIndex));
+            }
+            if (els.bubbleClearBtn) {
+                els.bubbleClearBtn.addEventListener('click', () => {
+                    const list = ensureBubbles(currentItem());
+                    if (!list.length) return;
+                    if (!confirm('清空这张图上的全部气泡？')) return;
+                    list.length = 0;
+                    selectedBubbleIndex = -1;
+                    renderBubblePanel();
+                    syncBubbleEditor();
+                    schedulePreview();
+                });
+            }
         }
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -866,6 +1182,7 @@
             syncSolidBgRowVisibility();
             syncDofUi();
             bindStyleControls();
+            renderBubblePanel();
 
             const savedFolder = localStorage.getItem(EXPORT_FOLDER_KEY);
             if (savedFolder) els.exportFolderPath.value = savedFolder;
@@ -898,14 +1215,18 @@
             els.prevPreviewBtn.addEventListener('click', () => {
                 if (previewIndex > 0) {
                     previewIndex -= 1;
+                    selectedBubbleIndex = -1;
                     renderFileList();
+                    renderBubblePanel();
                     schedulePreview();
                 }
             });
             els.nextPreviewBtn.addEventListener('click', () => {
                 if (previewIndex < files.length - 1) {
                     previewIndex += 1;
+                    selectedBubbleIndex = -1;
                     renderFileList();
+                    renderBubblePanel();
                     schedulePreview();
                 }
             });
@@ -935,6 +1256,50 @@
 
             window.addEventListener('resize', () => {
                 if (files.length) schedulePreview();
+            });
+
+            // 拖拽期间预览画布会被重建，所以移动/抬起挂在 document 上
+            document.addEventListener('mousemove', (e) => {
+                if (!bubbleDrag) return;
+                if (Math.abs(e.clientX - bubbleDrag.startX) < 3 && Math.abs(e.clientY - bubbleDrag.startY) < 3) return;
+                bubbleDrag.moved = true;
+                const canvas = document.getElementById('previewCanvas');
+                if (!canvas) return;
+                const p = canvasPointToNorm(e, canvas);
+                if (!p) return;
+                const list = ensureBubbles(currentItem());
+                const bubble = list[bubbleDrag.index];
+                if (!bubble) return;
+                const pos = clampBubbleToImage(bubble, p.x, p.y);
+                bubble.x = pos.x;
+                bubble.y = pos.y;
+                schedulePreview();
+            });
+
+            document.addEventListener('mouseup', (e) => {
+                if (!bubbleDrag) return;
+                const drag = bubbleDrag;
+                bubbleDrag = null;
+                if (drag.moved) {
+                    renderBubblePanel();
+                    schedulePreview();
+                    return;
+                }
+                if (drag.index >= 0) return;
+                const canvas = document.getElementById('previewCanvas');
+                if (!canvas) return;
+                const p = canvasPointToNorm(e, canvas);
+                if (!p) return;
+                addBubbleAt(p.x, p.y);
+            });
+
+            document.addEventListener('keydown', (e) => {
+                const tag = (e.target && e.target.tagName) || '';
+                if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+                if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+                if (selectedBubbleIndex < 0) return;
+                e.preventDefault();
+                deleteBubble(selectedBubbleIndex);
             });
         });
     </script>
