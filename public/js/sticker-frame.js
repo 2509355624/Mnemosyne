@@ -483,6 +483,121 @@
         return [[cx - tailHalf, cy + halfH - ol], [cx + tailHalf, cy + halfH - ol], [cx + skew, cy + halfH + tailLen]];
     }
 
+    /**
+     * 三角子路径的绕向要和主体一致。left / right 尾巴的点序与 ellipse 相反，
+     * 而 nonzero 填充规则下反向重叠区会被当成「洞」挖空，主体和尾巴的接缝处会透出底色。
+     */
+    function orientTriangle(tri) {
+        let area = 0;
+        for (let i = 0; i < tri.length; i += 1) {
+            const [x1, y1] = tri[i];
+            const [x2, y2] = tri[(i + 1) % tri.length];
+            area += x1 * y2 - x2 * y1;
+        }
+        return area < 0 ? [tri[0], tri[2], tri[1]] : tri;
+    }
+
+    /**
+     * 主体 + 尾巴合成一条路径（椭圆的绕向为正，三角已归一化）。
+     *
+     * 描边的做法：用双倍线宽沿这条并集轮廓描一次，再补一次填充把落在并集
+     * 内部的半条描边抹掉。这样「椭圆底弧横穿尾巴内部」那条线自然消失，
+     * 尾巴根部与主体的交界只剩一条连续外轮廓，不会出现交叉或台阶。
+     */
+    function bubbleOutlinePath(ctx, cx, cy, g, tailDir, tailLen, tailHalf) {
+        ctx.beginPath();
+        if (g.shape === 'ellipse') {
+            ctx.ellipse(cx, cy, g.halfW, g.halfH, 0, 0, Math.PI * 2);
+        } else {
+            const r = Math.min(g.radius, g.halfW, g.halfH);
+            const x = cx - g.halfW;
+            const y = cy - g.halfH;
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + g.w, y, x + g.w, y + g.h, r);
+            ctx.arcTo(x + g.w, y + g.h, x, y + g.h, r);
+            ctx.arcTo(x, y + g.h, x, y, r);
+            ctx.arcTo(x, y, x + g.w, y, r);
+            ctx.closePath();
+        }
+        if (tailDir) {
+            const tri = orientTriangle(tailTriangle(cx, cy, g.halfW, g.halfH, tailDir, tailLen, tailHalf));
+            ctx.moveTo(tri[0][0], tri[0][1]);
+            ctx.lineTo(tri[1][0], tri[1][1]);
+            ctx.lineTo(tri[2][0], tri[2][1]);
+            ctx.closePath();
+        }
+    }
+
+    /**
+     * 线段（起点在椭圆内、终点在外）与椭圆边界的交点，
+     * 顺带给出交点对应的椭圆参数角，可以直接喂给 ctx.ellipse 画弧。
+     */
+    function ellipseBoundaryHit(cx, cy, rx, ry, x1, y1, x2, y2) {
+        const dx = (x2 - x1) / rx;
+        const dy = (y2 - y1) / ry;
+        const ux = (x1 - cx) / rx;
+        const uy = (y1 - cy) / ry;
+        const a = dx * dx + dy * dy;
+        if (a < 1e-9) return null;
+        const b = 2 * (ux * dx + uy * dy);
+        const c = ux * ux + uy * uy - 1;
+        const disc = b * b - 4 * a * c;
+        if (disc < 0) return null;
+        const sq = Math.sqrt(disc);
+        const t = [(-b - sq) / (2 * a), (-b + sq) / (2 * a)].find((v) => v > 1e-6 && v < 1);
+        if (t === undefined) return null;
+        const px = x1 + (x2 - x1) * t;
+        const py = y1 + (y2 - y1) * t;
+        return { x: px, y: py, theta: Math.atan2((py - cy) / ry, (px - cx) / rx) };
+    }
+
+    /**
+     * 椭圆 + 尾巴的并集轮廓：从一条斜边穿出椭圆的点出发，沿「不经过尾巴的那段长弧」
+     * 绕到另一条斜边的穿出点，再折向尾巴尖。描边中心线因此正好压在真实边界上，
+     * 根部既不会被椭圆底弧横穿，也不会向外鼓出一个假肩。
+     * 求不到交点时返回 false，交回通用路径。
+     */
+    function buildEllipseUnionPath(ctx, cx, cy, g, tri, cornerR) {
+        const rx = g.halfW;
+        const ry = g.halfH;
+        const tip = tri[2];
+        const hitA = ellipseBoundaryHit(cx, cy, rx, ry, tri[0][0], tri[0][1], tip[0], tip[1]);
+        const hitB = ellipseBoundaryHit(cx, cy, rx, ry, tri[1][0], tri[1][1], tip[0], tip[1]);
+        if (!hitA || !hitB) return false;
+
+        const TAU = Math.PI * 2;
+        const fwd = (((hitB.theta - hitA.theta) % TAU) + TAU) % TAU;
+        const dir = fwd >= Math.PI ? 1 : -1;
+
+        // 弧线在这个角度上与尾边方向差的比较多，硬接会留一个「肩」，
+        // 所以两个交点各让出一小段，用二次曲线过渡，尖端仍保持锐角。
+        const legA = Math.hypot(tip[0] - hitA.x, tip[1] - hitA.y);
+        const legB = Math.hypot(tip[0] - hitB.x, tip[1] - hitB.y);
+        const d = Math.min(cornerR, legA * 0.3, legB * 0.3);
+        const dTheta = Math.min(0.14, d / ((rx + ry) / 2));
+
+        const thA2 = hitA.theta + dir * dTheta;
+        const thB2 = hitB.theta - dir * dTheta;
+        const pA2 = [cx + rx * Math.cos(thA2), cy + ry * Math.sin(thA2)];
+        const pB2 = [cx + rx * Math.cos(thB2), cy + ry * Math.sin(thB2)];
+        const pA3 = [hitA.x + ((tip[0] - hitA.x) / legA) * d, hitA.y + ((tip[1] - hitA.y) / legA) * d];
+        const pB3 = [hitB.x + ((tip[0] - hitB.x) / legB) * d, hitB.y + ((tip[1] - hitB.y) / legB) * d];
+        const fwd2 = (((thB2 - thA2) % TAU) + TAU) % TAU;
+
+        ctx.beginPath();
+        ctx.moveTo(pA3[0], pA3[1]);
+        ctx.quadraticCurveTo(hitA.x, hitA.y, pA2[0], pA2[1]);
+        if (dir > 0) {
+            ctx.ellipse(cx, cy, rx, ry, 0, thA2, thA2 + fwd2, false);
+        } else {
+            ctx.ellipse(cx, cy, rx, ry, 0, thA2, thA2 + fwd2 - TAU, true);
+        }
+        ctx.quadraticCurveTo(hitB.x, hitB.y, pB3[0], pB3[1]);
+        ctx.lineTo(tip[0], tip[1]);
+        ctx.closePath();
+        return true;
+    }
+
     function drawBubble(ctx, bubble, cx, cy, drawW, uiScale) {
         const m = measureBubble(ctx, bubble, drawW, uiScale);
         if (!m.visible.length) return null;
@@ -495,49 +610,45 @@
         const fill = bubble.fillColor || BUBBLE_DEFAULTS.fillColor;
         const stroke = bubble.strokeColor || BUBBLE_DEFAULTS.strokeColor;
 
+        // 椭圆 + 尾巴能拼出精确的并集轮廓，描边就压在真实边界上；
+        // 圆角方框的边界是四段直线 + 四段圆角，拼轮廓要分四种朝向各写一遍，
+        // 这里退回「双倍线宽描边 + 补填抹掉内半」的通用做法，代价只是交接处略微外鼓。
+        const outlinePath = () => {
+            if (tailDir && shape === 'ellipse') {
+                const tri = tailTriangle(cx, cy, g.halfW, g.halfH, tailDir, tailLen, tailHalf);
+                if (buildEllipseUnionPath(ctx, cx, cy, g, tri, strokeW * 0.7)) return true;
+            }
+            bubbleOutlinePath(ctx, cx, cy, g, tailDir, tailLen, tailHalf);
+            return false;
+        };
+
         ctx.save();
-        ctx.lineJoin = 'round';
+        ctx.lineJoin = 'miter';
+        ctx.miterLimit = 8;
         ctx.lineCap = 'round';
 
-        if (tailDir) {
-            const tri = tailTriangle(cx, cy, g.halfW, g.halfH, tailDir, tailLen, tailHalf);
-            ctx.beginPath();
-            ctx.moveTo(tri[0][0], tri[0][1]);
-            ctx.lineTo(tri[1][0], tri[1][1]);
-            ctx.lineTo(tri[2][0], tri[2][1]);
-            ctx.closePath();
-            ctx.fillStyle = fill;
-            ctx.fill();
-            ctx.strokeStyle = stroke;
-            ctx.lineWidth = strokeW;
-            ctx.stroke();
-        }
-
-        // 主体带阴影，压在尾巴根部之上，接缝自然
+        // 1) 白底 + 投影：主体与尾巴按同一条轮廓填充，根部不会有缝
         ctx.save();
         ctx.shadowColor = 'rgba(20, 16, 10, 0.28)';
         ctx.shadowBlur = Math.max(4, m.fontSize * 0.7);
         ctx.shadowOffsetY = Math.max(2, m.fontSize * 0.18);
         ctx.fillStyle = fill;
-        if (shape === 'ellipse') {
-            ctx.beginPath();
-            ctx.ellipse(cx, cy, g.halfW, g.halfH, 0, 0, Math.PI * 2);
-            ctx.fill();
-        } else {
-            roundRect(ctx, cx - g.halfW, cy - g.halfH, g.w, g.h, g.radius);
-            ctx.fill();
-        }
+        const exactUnion = outlinePath();
+        ctx.fill();
         ctx.restore();
 
+        // 2) 描边：精确轮廓用正常线宽；通用路径用双倍线宽，一半会压在形状内部
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = strokeW;
-        if (shape === 'ellipse') {
-            ctx.beginPath();
-            ctx.ellipse(cx, cy, g.halfW, g.halfH, 0, 0, Math.PI * 2);
-            ctx.stroke();
-        } else {
-            roundRect(ctx, cx - g.halfW, cy - g.halfH, g.w, g.h, g.radius);
-            ctx.stroke();
+        ctx.lineWidth = exactUnion ? strokeW : strokeW * 2;
+        outlinePath();
+        ctx.stroke();
+
+        // 3) 通用路径再填一次，抹掉落在并集内部的那半描边
+        //    —— 椭圆横穿尾巴的那段、三角顶边都在这一步消失
+        if (!exactUnion) {
+            ctx.fillStyle = fill;
+            outlinePath();
+            ctx.fill();
         }
 
         ctx.fillStyle = bubble.textColor || BUBBLE_DEFAULTS.textColor;
