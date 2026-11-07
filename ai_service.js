@@ -2,10 +2,10 @@ const axios = require('axios');
 const ragService = require('./rag_service');
 
 /** Recent verbatim rounds sent in messages; older context via turnMemory briefs */
-const RECENT_FULL_ROUNDS = 6;
+const RECENT_FULL_ROUNDS = 4;
 const TURN_MEMORY_STORE_MAX = 20;
 const TURN_MEMORY_PROMPT_MAX = 10;
-const EMOTION_CONTEXT_ROUNDS = 6;
+const EMOTION_CONTEXT_ROUNDS = 4;
 
 class AIService {
     constructor() {
@@ -106,7 +106,9 @@ class AIService {
 1. 从【本轮用户】和【角色回复】提取动作/地点/穿着关键词，写成英文 Danbooru tags。
 2. 用户说「床上/躺着/张开腿」→ action 写 lying_on_back, legs_spread 等；scene 写 bedroom, on_bed。
 3. continuity 只是默认值；对话里已经出现的地点/姿势必须优先于 continuity。
-4. 不要写角色固定外貌（发色瞳色等由底模负责）。`;
+4. **角色名要带上**（如 sunna (zenless zone zero)）——它是角色 LoRA 的开关，不写就触发不了。
+5. **角色固定外貌不写**（发色/瞳色/发型/发饰由角色卡的固定块提供）。实测：这里写了 green hair 反而被底模的银白倾向盖掉，不写才对。
+6. **服饰默认沿用上一轮**，只有对话里真的脱了、换了才改；写具体到几件、什么颜色（loose beige knit sweater and grey lounge shorts），不写 casual clothes 这种空话。`;
 
         this.outfitVisualAnalysisPrompt = `你是 SD 1.5 出图 tag 策划。读对话，提取关键词，输出英文 tags。
 
@@ -303,10 +305,6 @@ class AIService {
     /** 统一纯文本分析调用（生图 ### 分段） */
     async callTextAnalysis(prompt, provider, model, apiKey, baseUrl) {
         const messages = [{ role: 'user', content: prompt }];
-        const label = `[LLM-TEXT] ${provider}/${model}`;
-        const t0 = Date.now();
-        console.log(`${label} start, prompt ${prompt.length} chars`);
-        try {
         if (provider === 'ollama') {
             const url = (baseUrl || 'http://localhost:11434').replace(/\/$/, '');
             const response = await axios.post(`${url}/api/chat`, {
@@ -315,8 +313,6 @@ class AIService {
                 stream: false,
                 keep_alive: 0
             }, { timeout: 600000 });
-            const t1 = Date.now();
-            console.log(`${label} done in ${t1 - t0}ms, resp ${response.data?.message?.content?.length || 0} chars`);
             return response.data?.message?.content || '';
         }
         if (provider === 'doubao') {
@@ -334,8 +330,6 @@ class AIService {
                 },
                 timeout: 60000
             });
-            const t1 = Date.now();
-            console.log(`${label} done in ${t1 - t0}ms, resp ${response.data?.choices?.[0]?.message?.content?.length || 0} chars`);
             return response.data?.choices?.[0]?.message?.content || '';
         }
         const isDeepseek = provider === 'deepseek';
@@ -353,23 +347,12 @@ class AIService {
             headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
             timeout: 600000
         });
-        const t1 = Date.now();
-        console.log(`${label} done in ${t1 - t0}ms, resp ${response.data?.choices?.[0]?.message?.content?.length || 0} chars`);
         return response.data?.choices?.[0]?.message?.content || '';
-        } catch (e) {
-            const t1 = Date.now();
-            console.error(`${label} FAILED in ${t1 - t0}ms: ${e.message}`);
-            throw e;
-        }
     }
 
     /** 统一 JSON 分析调用（情感） */
     async callJsonAnalysis(prompt, provider, model, apiKey, baseUrl) {
         const messages = [{ role: 'user', content: prompt }];
-        const label = `[LLM-JSON] ${provider}/${model}`;
-        const t0 = Date.now();
-        console.log(`${label} start, prompt ${prompt.length} chars`);
-        try {
         if (provider === 'ollama') {
             const url = (baseUrl || 'http://localhost:11434').replace(/\/$/, '');
             const response = await axios.post(`${url}/api/chat`, {
@@ -379,8 +362,6 @@ class AIService {
                 format: 'json',
                 keep_alive: 0
             }, { timeout: 600000 });
-            const t1 = Date.now();
-            console.log(`${label} done in ${t1 - t0}ms, resp ${response.data?.message?.content?.length || 0} chars`);
             return response.data?.message?.content || '';
         }
         if (provider === 'doubao') {
@@ -399,8 +380,6 @@ class AIService {
                 },
                 timeout: 60000
             });
-            const t1 = Date.now();
-            console.log(`${label} done in ${t1 - t0}ms, resp ${response.data?.choices?.[0]?.message?.content?.length || 0} chars`);
             return response.data?.choices?.[0]?.message?.content || '';
         }
         const isDeepseek = provider === 'deepseek';
@@ -423,14 +402,7 @@ class AIService {
             },
             timeout: 600000
         });
-        const t1 = Date.now();
-        console.log(`${label} done in ${t1 - t0}ms, resp ${response.data?.choices?.[0]?.message?.content?.length || 0} chars`);
         return response.data?.choices?.[0]?.message?.content || '';
-        } catch (e) {
-            const t1 = Date.now();
-            console.error(`${label} FAILED in ${t1 - t0}ms: ${e.message}`);
-            throw e;
-        }
     }
 
     /** Tags that belong in action (held items), not in scene background */
@@ -1967,8 +1939,7 @@ ${this.visualChangeHint(changeIntent, userMessage)}
         totalStartTime,
         previousVisual = null,
         emit = null,
-        skipImagePipeline = false,
-        ragRetrieveLog = null
+        skipImagePipeline = false
     }) {
         const displayReply = this.stripVisualBlocksFromReply(replyContent);
         const lastUserMsg = [...recentTurns].reverse().find((m) => m.role === 'user')?.content || '';
@@ -2071,7 +2042,6 @@ ${this.visualChangeHint(changeIntent, userMessage)}
                 emotionMessages: emotionDebugInfo?.emotionMessages || [],
                 outfitVisualPrompt: outfitVisualDebugInfo?.outfitVisualPrompt || '',
                 outfitVisualMessages: outfitVisualDebugInfo?.outfitVisualMessages || [],
-                ragRetrieveLog: ragRetrieveLog || null,
                 sentPrompt: fullSystemPrompt,
                 sentMessages: chatMessages,
                 rawResponse: replyContent,
@@ -2556,7 +2526,6 @@ ${this.visualChangeHint(changeIntent, userMessage)}
 
         let ragDocs = [];
         let ragRetrieveMs = 0;
-        let ragRetrieveLog = null;
         if (ragService.isEnabled() && ragEnabled !== false && characterId) {
             const lastUserMsg = [...cleanMessages].reverse().find((m) => m.role === 'user')?.content || '';
             if (lastUserMsg) {
@@ -2564,16 +2533,6 @@ ${this.visualChangeHint(changeIntent, userMessage)}
                 const ragStart = Date.now();
                 ragDocs = await ragService.retrieve(characterId, lastUserMsg);
                 ragRetrieveMs = Date.now() - ragStart;
-                ragRetrieveLog = {
-                    query: lastUserMsg,
-                    retrieveMs: ragRetrieveMs,
-                    totalResults: ragDocs.length,
-                    docs: ragDocs.map((doc, idx) => ({
-                        rank: idx + 1,
-                        content: String(doc.content || '').slice(0, 500),
-                        metadata: doc.metadata || {}
-                    }))
-                };
                 if (ragDocs.length) {
                     console.log(`[RAG] retrieved ${ragDocs.length} docs for ${characterId} (${ragRetrieveMs}ms)`);
                 }
@@ -2644,8 +2603,7 @@ ${this.visualChangeHint(changeIntent, userMessage)}
             totalStartTime,
             previousVisual: previousVisual || null,
             emit,
-            skipImagePipeline,
-            ragRetrieveLog
+            skipImagePipeline
         });
 
         return {
